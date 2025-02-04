@@ -1,4 +1,5 @@
 Name,PAN,CIBIL,DOB,Loan_Type,Sanctioned_Amount,Current_Amount,Credit_Card,Late_Payment,Loan_Tenure,Interest_Rate,Monthly_Income,Monthly_EMI,Previous_Loans,Defaults,Credit_Cards_Count,Credit_Utilization,Loan_Repayment_History,Other_Debts,Employment_Type,Existing_EMIs,Savings_Balance,Total_Annual_Income,Debt_to_Income_Ratio
+Kondalrao, KOSDE3421L, 720,2001-05-24,Personal Loan, 300000, 350000,NO,YES,9,3.5,25000,30000,1,4,0,0,Good,YES,Government Employee,1,60000,700000,0.004
 Rushil Varma,ZVLEO9461U,417,1976-08-04,Personal Loan,14710,5433,NO,NO,3,17.15,60672,5490,2,2,2,57,Poor,YES,Salaried,1,488359,728064,0.09
 Om Ganesan,LJBDJ9055W,740,1972-07-11,Home Loan,38801,35955,YES,YES,1,14.9,87018,2658,3,1,2,89,Good,YES,Freelancer,2,456670,1044216,0.03
 Siddharth Kadakia,XKPQO9930V,793,1970-07-21,Personal Loan,14451,361,NO,NO,2,9.93,124485,12829,0,0,1,73,Good,YES,Freelancer,2,202743,1493820,0.1
@@ -150,4 +151,3 @@ Abhiram Misra,QQEHY3868X,579,1994-09-26,Home Loan,46183,35609,YES,NO,5,12.39,151
 Harita Chandran,SFIHM6301K,343,1961-03-14,Personal Loan,46228,20643,NO,NO,6,8.91,54692,8762,5,2,2,86,Good,NO,Salaried,3,496919,656304,0.16
 Garima Apte,BCMDY5394Z,537,1963-10-15,Education Loan,25592,18445,YES,YES,7,17.31,190431,2931,0,0,5,52,Good,YES,Self-Employed,1,117741,2285172,0.02
 Keya Bhargava,YMNNJ6496K,639,1998-05-11,Car Loan,39731,0,YES,YES,7,8.4,183972,10776,4,2,2,63,Poor,NO,Freelancer,0,404350,2207664,0.06
-Ragunath , DSFKW2134J, 750,2003-11-21,None,0,0,NO,NO,0,0,0,0,0,0,0,0,Poor,NO,Salaried,0,0,0,0
