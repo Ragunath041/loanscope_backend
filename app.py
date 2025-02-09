@@ -12,7 +12,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize model
 model = CibilScoreModel()
-GOOGLE_MAPS_API_KEY = os.getenv("AIzaSyBqPxfYB_XmfZ-WfImTphSu4QaZqUSSLn4&loading")
+GOOGLE_MAPS_API_KEY = os.getenv("AIzaSyBqPxfYB_XmfZ-WfImTphSu4QaZqUSSLn4")
 
 @app.route('/search_nearby_banks', methods=['GET'])
 def search_nearby_banks():
@@ -38,12 +38,21 @@ def search_nearby_banks():
         # Make request to Google API
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+
+        # DEBUG: Log API response
+        print(f"Requesting banks for location: {location}")
+        print(f"Google API Response: {data}")
+
+        if "results" not in data or len(data["results"]) == 0:
+            return jsonify({"status": "success", "message": "No banks found nearby", "results": []})
 
         # Return response as JSON
-        return jsonify(response.json())
+        return jsonify(data)
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/predict_cibil', methods=['POST'])
 def predict_cibil():
     try:
