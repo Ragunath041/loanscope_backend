@@ -12,7 +12,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize model
 model = CibilScoreModel()
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+GOOGLE_MAPS_API_KEY = os.getenv("AIzaSyBqPxfYB_XmfZ-WfImTphSu4QaZqUSSLn4&loading")
 
 @app.route('/search_nearby_banks', methods=['GET'])
 def search_nearby_banks():
