@@ -19,7 +19,7 @@ def search_nearby_banks():
     """Fetch nearby banks using Google Places API without CORS issues."""
     try:
         location = request.args.get('location')  # Expected format: "lat,lng"
-        radius = request.args.get('radius', 5000)  # Default: 5000 meters (5 km)
+        radius = request.args.get('radius', 10000)  # Default: 5000 meters (5 km)
         bank_name = request.args.get('bank_name', '')
 
         if not location:
