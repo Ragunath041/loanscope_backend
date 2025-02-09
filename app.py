@@ -19,7 +19,7 @@ def search_nearby_banks():
     """Fetch nearby banks using Google Places API without CORS issues."""
     try:
         location = request.args.get('location')  # Expected format: "lat,lng"
-        radius = request.args.get('radius', 10000)  # Default: 5000 meters (5 km)
+        radius = request.args.get('radius', 10000)  # Default: 10 km
         bank_name = request.args.get('bank_name', '')
 
         if not location:
@@ -35,20 +35,26 @@ def search_nearby_banks():
             "key": GOOGLE_MAPS_API_KEY
         }
 
-        # Make request to Google API
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, params=params)
         data = response.json()
 
-        # DEBUG: Log API response
-        print(f"Requesting banks for location: {location}")
-        print(f"Google API Response: {data}")
+        if data['status'] != 'OK':
+            return jsonify({"status": "error", "message": "No banks found nearby"}), 404
 
-        if "results" not in data or len(data["results"]) == 0:
-            return jsonify({"status": "success", "message": "No banks found nearby", "results": []})
+        # Extract relevant information
+        results = []
+        for place in data.get('results', []):
+            results.append({
+                "name": place.get("name"),
+                "vicinity": place.get("vicinity"),
+                "location": place.get("geometry", {}).get("location"),
+                "rating": place.get("rating"),
+                "user_ratings_total": place.get("user_ratings_total"),
+                "place_id": place.get("place_id"),
+                "icon": place.get("icon"),
+            })
 
-        # Return response as JSON
-        return jsonify(data)
+        return jsonify({"status": "success", "results": results})
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
