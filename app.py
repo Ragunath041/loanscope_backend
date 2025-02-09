@@ -4,13 +4,46 @@ from train_model import CibilScoreModel
 import numpy as np
 import os
 import pandas as pd
+import requests
+
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize model
 model = CibilScoreModel()
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
+@app.route('/search_nearby_banks', methods=['GET'])
+def search_nearby_banks():
+    """Fetch nearby banks using Google Places API without CORS issues."""
+    try:
+        location = request.args.get('location')  # Expected format: "lat,lng"
+        radius = request.args.get('radius', 5000)  # Default: 5000 meters (5 km)
+        bank_name = request.args.get('bank_name', '')
+
+        if not location:
+            return jsonify({"status": "error", "message": "Location is required"}), 400
+
+        # Google Places API URL
+        url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+        params = {
+            "location": location,
+            "radius": radius,
+            "type": "bank",
+            "keyword": bank_name,
+            "key": GOOGLE_MAPS_API_KEY
+        }
+
+        # Make request to Google API
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, params=params)
+
+        # Return response as JSON
+        return jsonify(response.json())
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 @app.route('/predict_cibil', methods=['POST'])
 def predict_cibil():
     try:
