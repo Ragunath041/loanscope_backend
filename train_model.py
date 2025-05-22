@@ -1,255 +1,351 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestRegressor
 import pickle
 import os
-import firebase_admin
-from firebase_admin import credentials, ml
+import joblib
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.metrics import mean_squared_error, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from pymongo import MongoClient
 
 class CibilScoreModel:
-    def __init__(self):
-        self.model = None
-        self.scaler = StandardScaler()
-        self.model_path = 'model/cibil_model.pkl'
-        self.scaler_path = 'model/scaler.pkl'
+    """
+    Class to handle CIBIL score prediction and loan default prediction
+    Includes methods for data preparation, model training, evaluation, and prediction
+    """
+    
+    def __init__(self, model_dir='model'):
+        """Initialize the model with the directory to save/load models"""
+        self.model_dir = model_dir
+        os.makedirs(model_dir, exist_ok=True)
         
-    def prepare_data(self):
-        try:
-            # Read the CSV file
-            df = pd.read_csv('cibil_data.csv')
-            
-            # Select only the relevant numeric columns and target
-            relevant_columns = [
-                'Sanctioned_Amount',
-                'Current_Amount',
-                'Loan_Tenure',
-                'Monthly_EMI',
-                'Previous_Loans',
-                'Defaults',
-                'Credit_Utilization',
-                'Monthly_Income',
-                'Late_Payment',
-                'CIBIL'  # Target variable
-            ]
-            
-            # Select only relevant columns
-            df = df[relevant_columns]
-            
-            # Convert Late_Payment to numeric (YES/NO to 1/0)
-            df['Late_Payment'] = (df['Late_Payment'] == 'YES').astype(int)
-            
-            # Create feature matrix X and target y
-            X = df.drop('CIBIL', axis=1)  # All columns except CIBIL
-            y = df['CIBIL']  # Target variable
+        # CIBIL prediction model
+        self.cibil_model = None
+        self.cibil_scaler = None
+        
+        # Default prediction model
+        self.default_model = None
+        self.default_scaler = None
+        
+        # Connect to MongoDB
+        self.client = MongoClient('mongodb://localhost:27017/')
+        self.db = self.client['loanscope']
+        self.cibil_collection = self.db['cibil_data']
+        
+    def prepare_data(self, csv_path='cibil_data.csv'):
+        """Prepare data for model training"""
+        # Load the data
+        data = pd.read_csv(csv_path)
+        
+        # Data preprocessing for CIBIL prediction model
+        # Extract features and target for CIBIL impact prediction
+        cibil_features = data[['CIBIL', 'Sanctioned_Amount', 'Loan_Tenure', 
+                              'Interest_Rate', 'Monthly_Income', 'Previous_Loans', 
+                              'Credit_Utilization', 'Debt_to_Income_Ratio', 
+                              'DOB']].copy()
+        
+        # Convert DOB to age
+        cibil_features['DOB'] = pd.to_datetime(cibil_features['DOB'], format='%d-%m-%Y', errors='coerce')
+        current_year = pd.Timestamp.now().year
+        cibil_features['Age'] = current_year - cibil_features['DOB'].dt.year
+        cibil_features.drop('DOB', axis=1, inplace=True)
+        
+        # Create payment history score (derived from Loan_Repayment_History)
+        payment_history = pd.Series(np.where(data['Loan_Repayment_History'] == 'Good', 100,
+                                  np.where(data['Loan_Repayment_History'] == 'Average', 75, 50)))
+        cibil_features['Payment_History'] = payment_history
             
             # Handle missing values
-            X = X.fillna(X.mean())
-            y = y.fillna(y.mean())
-            
-            # Split the data
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
-            
-            # Scale features
-            X_train_scaled = self.scaler.fit_transform(X_train)
-            X_test_scaled = self.scaler.transform(X_test)
-            
-            # Save feature names for prediction
-            self.feature_names = X.columns.tolist()
-            
-            return X_train_scaled, X_test_scaled, y_train, y_test
-            
-        except Exception as e:
-            print(f"Error in prepare_data: {str(e)}")
-            raise
+        cibil_features.fillna({
+            'CIBIL': data['CIBIL'].median(),
+            'Sanctioned_Amount': data['Sanctioned_Amount'].median(),
+            'Loan_Tenure': data['Loan_Tenure'].median(),
+            'Interest_Rate': data['Interest_Rate'].median(),
+            'Monthly_Income': data['Monthly_Income'].median(),
+            'Previous_Loans': data['Previous_Loans'].median(),
+            'Credit_Utilization': 0,
+            'Debt_to_Income_Ratio': 0.1,
+            'Age': 30,
+            'Payment_History': 75
+        }, inplace=True)
+        
+        # Create synthetic target for CIBIL impact
+        # This calculates how much the CIBIL score might change based on the data
+        # In a real scenario, you would have historical data showing actual changes
+        
+        # Higher debt-to-income ratio reduces score
+        dti_impact = -10 * data['Debt_to_Income_Ratio']
+        
+        # Late payments reduce score
+        late_payment_impact = np.where(data['Late_Payment'] == 'YES', -15, 0)
+        
+        # Good repayment history improves score
+        history_impact = np.where(data['Loan_Repayment_History'] == 'Good', 5,
+                                np.where(data['Loan_Repayment_History'] == 'Average', 0, -5))
+        
+        # Create the target variable as the combined impact
+        cibil_impact = dti_impact + late_payment_impact + history_impact
+        
+        # Add some random variation to make the model more realistic
+        np.random.seed(42)
+        random_variation = np.random.normal(0, 3, size=len(cibil_impact))
+        cibil_impact += random_variation
+        
+        # Rename columns to match the expected format in Flask app
+        cibil_features.rename(columns={
+            'CIBIL': 'current_cibil',
+            'Sanctioned_Amount': 'loan_amount',
+            'Loan_Tenure': 'tenure_months',
+            'Interest_Rate': 'interest_rate',
+            'Monthly_Income': 'monthly_income',
+            'Previous_Loans': 'existing_loans',
+            'Credit_Utilization': 'credit_utilization',
+            'Debt_to_Income_Ratio': 'debt_to_income',
+            'Payment_History': 'payment_history'
+        }, inplace=True)
+        
+        # Data preprocessing for default prediction model
+        # Create a binary target for default (1 = default, 0 = no default)
+        # Here we're creating synthetic data based on domain knowledge
+        default_target = np.zeros(len(data))
+        
+        # Higher probability of default if:
+        # - CIBIL score is low
+        # - Debt-to-income ratio is high
+        # - Late payments
+        # - Defaults history
+        
+        low_cibil_mask = data['CIBIL'] < 600
+        high_dti_mask = data['Debt_to_Income_Ratio'] > 0.4
+        late_payment_mask = data['Late_Payment'] == 'YES'
+        defaults_mask = data['Defaults'] > 0
+        
+        # Assign default=1 based on these factors
+        default_target[low_cibil_mask & high_dti_mask] = 1
+        default_target[late_payment_mask & defaults_mask] = 1
+        default_target[low_cibil_mask & late_payment_mask] = 1
+        default_target[high_dti_mask & defaults_mask] = 1
+        
+        # Add some randomness to make it realistic
+        np.random.seed(43)
+        random_defaults = np.random.binomial(1, 0.15, size=len(default_target))
+        default_target = np.where(random_defaults == 1, default_target, random_defaults)
+        
+        # Create features for default prediction
+        default_features = data[['CIBIL', 'Sanctioned_Amount', 'Loan_Tenure', 
+                                'Interest_Rate', 'Monthly_Income', 'Previous_Loans', 
+                                'Debt_to_Income_Ratio']].copy()
+        
+        # Add employment years (derived from Employment_Type)
+        employment_years = pd.Series(np.where(data['Employment_Type'] == 'Salaried', 5,
+                                  np.where(data['Employment_Type'] == 'Self-Employed', 3, 1)))
+        default_features['Employment_Years'] = employment_years
+        
+        # Add age
+        default_features['Age'] = cibil_features['Age']
+        
+        # Handle missing values
+        default_features.fillna({
+            'CIBIL': data['CIBIL'].median(),
+            'Sanctioned_Amount': data['Sanctioned_Amount'].median(),
+            'Loan_Tenure': data['Loan_Tenure'].median(),
+            'Interest_Rate': data['Interest_Rate'].median(),
+            'Monthly_Income': data['Monthly_Income'].median(),
+            'Previous_Loans': data['Previous_Loans'].median(),
+            'Debt_to_Income_Ratio': 0.1,
+            'Employment_Years': 3,
+            'Age': 30
+        }, inplace=True)
+        
+        # Rename columns to match the expected format in Flask app
+        default_features.rename(columns={
+            'CIBIL': 'cibil_score',
+            'Sanctioned_Amount': 'loan_amount',
+            'Loan_Tenure': 'tenure_months',
+            'Interest_Rate': 'interest_rate',
+            'Monthly_Income': 'monthly_income',
+            'Previous_Loans': 'existing_loans',
+            'Debt_to_Income_Ratio': 'debt_to_income'
+        }, inplace=True)
+        
+        # Multiply debt_to_income by 100 to match the expected format
+        default_features['debt_to_income'] = default_features['debt_to_income'] * 100
+        cibil_features['debt_to_income'] = cibil_features['debt_to_income'] * 100
+        
+        return cibil_features, cibil_impact, default_features, default_target
     
     def train(self):
-        try:
-            # Create model directory if it doesn't exist
-            os.makedirs('model', exist_ok=True)
-            
-            # Prepare data
-            X_train_scaled, X_test_scaled, y_train, y_test = self.prepare_data()
-            
-            # Initialize and train the model
-            self.model = RandomForestRegressor(
-                n_estimators=100,
-                max_depth=None,  # Let the trees grow fully
-                min_samples_split=2,
-                min_samples_leaf=1,
-                random_state=42
-            )
-            
-            # Fit the model
-            self.model.fit(X_train_scaled, y_train)
-            
-            # Calculate and print accuracy metrics
-            train_score = self.model.score(X_train_scaled, y_train)
-            test_score = self.model.score(X_test_scaled, y_test)
-            
-            print(f"Training Score: {train_score:.4f}")
-            print(f"Testing Score: {test_score:.4f}")
-            
-            # Feature importance
-            feature_importance = dict(zip(self.feature_names, 
-                                       self.model.feature_importances_))
-            print("\nFeature Importance:")
-            for feature, importance in sorted(feature_importance.items(), 
-                                           key=lambda x: x[1], reverse=True):
-                print(f"{feature}: {importance:.4f}")
-            
-            # Save model and scaler
-            self.save_model()
-            
-            return self.model
-            
-        except Exception as e:
-            print(f"Error in train: {str(e)}")
-            raise
-    
-    def save_model(self):
-        try:
-            # Save the model
-            with open(self.model_path, 'wb') as f:
-                pickle.dump(self.model, f)
-            
-            # Save the scaler
-            with open(self.scaler_path, 'wb') as f:
-                pickle.dump(self.scaler, f)
-            
-            # Save feature names
-            with open('model/feature_names.pkl', 'wb') as f:
-                pickle.dump(self.feature_names, f)
-                
-            print(f"Model saved to {self.model_path}")
-            print(f"Scaler saved to {self.scaler_path}")
-            
-        except Exception as e:
-            print(f"Error in save_model: {str(e)}")
-            raise
-    
-    def load_model(self):
-        try:
-            # Load the model
-            with open(self.model_path, 'rb') as f:
-                self.model = pickle.load(f)
-            
-            # Load the scaler
-            with open(self.scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
-            
-            # Load feature names
-            with open('model/feature_names.pkl', 'rb') as f:
-                self.feature_names = pickle.load(f)
-                
-        except Exception as e:
-            print(f"Error in load_model: {str(e)}")
-            raise
-    
-    def predict(self, input_data):
-        try:
-            if self.model is None:
-                self.load_model()
-            
-            # Create input array with the same features used in training
-            input_values = []
-            for feature in self.feature_names:
-                if feature in input_data:
-                    input_values.append(float(input_data[feature]))
-                else:
-                    # If feature is missing, use a default value
-                    print(f"Warning: Missing feature {feature} in input data")
-                    input_values.append(0.0)
-            
-            input_array = np.array([input_values])
-            
-            # Scale input
-            input_scaled = self.scaler.transform(input_array)
-            
-            # Make prediction
-            prediction = self.model.predict(input_scaled)[0]
-            
-            # CIBIL scores are typically between 300 and 900
-            prediction = max(300, min(900, int(round(prediction))))
-            
-            return prediction
-            
-        except Exception as e:
-            print(f"Error in predict: {str(e)}")
-            raise
-
-# Initialize Firebase
-def initialize_firebase():
-    try:
-        cred = credentials.Certificate('./credentials/loanscope-9f38b-firebase-adminsdk-fbsvc-3b3f380bbc.json')
-        if not firebase_admin._apps:  # Check if already initialized
-            firebase_admin.initialize_app(cred, {
-                'storageBucket': 'loanscope-9f38b.appspot.com'  # Add your Firebase storage bucket
-            })
-    except Exception as e:
-        print(f"Error initializing Firebase: {str(e)}")
-        raise
-
-# Deploy model to Firebase ML
-def deploy_to_firebase(model):
-    try:
-        import tensorflow as tf
-        from firebase_admin import storage
+        """Train the CIBIL score and default prediction models"""
+        # Prepare data
+        cibil_features, cibil_impact, default_features, default_target = self.prepare_data()
         
-        # Get bucket
-        bucket = storage.bucket()
-        
-        # Convert the model to TensorFlow format
-        model_path = 'model/model.tflite'
-        
-        # Create a TF SavedModel format with proper weights and bias
-        tf_model = tf.keras.Sequential([
-            tf.keras.layers.Dense(1, input_shape=(len(model.feature_names),))
-        ])
-        
-        # Initialize the weights properly
-        initial_weights = [
-            model.model.feature_importances_.reshape(-1, 1),  # weights
-            np.array([0.0])  # bias
-        ]
-        tf_model.set_weights(initial_weights)
-        
-        # Convert to TFLite
-        converter = tf.lite.TFLiteConverter.from_keras_model(tf_model)
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        tflite_model = converter.convert()
-        
-        # Save the TFLite model
-        with open(model_path, 'wb') as f:
-            f.write(tflite_model)
-        
-        # Upload to Firebase Storage
-        blob = bucket.blob('models/cibil_model.tflite')
-        blob.upload_from_filename(model_path)
-        
-        # Get the public URL
-        model_url = blob.public_url
-        
-        # Create Firebase ML model
-        firebase_model = ml.Model(
-            display_name='cibil_score_predictor',
-            tags=['cibil', 'credit_score'],
-            model_format=ml.TFLiteFormat(
-                model_source=ml.TFLiteGCSModelSource.from_uri(model_url)
-            )
+        # Split data for CIBIL prediction
+        X_cibil_train, X_cibil_test, y_cibil_train, y_cibil_test = train_test_split(
+            cibil_features, cibil_impact, test_size=0.2, random_state=42
         )
         
-        # Upload model to Firebase ML
-        firebase_model = ml.create_model(firebase_model)
-        print(f"Model successfully deployed to Firebase ML with name: {firebase_model.display_name}")
-        return firebase_model
+        # Scale features for CIBIL prediction
+        self.cibil_scaler = StandardScaler()
+        X_cibil_train_scaled = self.cibil_scaler.fit_transform(X_cibil_train)
+        X_cibil_test_scaled = self.cibil_scaler.transform(X_cibil_test)
         
-    except Exception as e:
-        print(f"Error deploying to Firebase: {str(e)}")
-        raise
+        # Train CIBIL prediction model
+        print("Training CIBIL prediction model...")
+        self.cibil_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        self.cibil_model.fit(X_cibil_train_scaled, y_cibil_train)
+        
+        # Evaluate CIBIL prediction model
+        y_cibil_pred = self.cibil_model.predict(X_cibil_test_scaled)
+        cibil_mse = mean_squared_error(y_cibil_test, y_cibil_pred)
+        cibil_rmse = np.sqrt(cibil_mse)
+        
+        print(f"CIBIL prediction model - RMSE: {cibil_rmse:.2f}")
+        
+        # Split data for default prediction
+        X_default_train, X_default_test, y_default_train, y_default_test = train_test_split(
+            default_features, default_target, test_size=0.2, random_state=42, stratify=default_target
+        )
+        
+        # Scale features for default prediction
+        self.default_scaler = StandardScaler()
+        X_default_train_scaled = self.default_scaler.fit_transform(X_default_train)
+        X_default_test_scaled = self.default_scaler.transform(X_default_test)
+        
+        # Train default prediction model
+        print("Training default prediction model...")
+        self.default_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        self.default_model.fit(X_default_train_scaled, y_default_train)
+        
+        # Evaluate default prediction model
+        y_default_pred = self.default_model.predict(X_default_test_scaled)
+        y_default_prob = self.default_model.predict_proba(X_default_test_scaled)[:, 1]
+        
+        accuracy = accuracy_score(y_default_test, y_default_pred)
+        precision = precision_score(y_default_test, y_default_pred)
+        recall = recall_score(y_default_test, y_default_pred)
+        f1 = f1_score(y_default_test, y_default_pred)
+        auc = roc_auc_score(y_default_test, y_default_prob)
+        
+        print(f"Default prediction model - Accuracy: {accuracy:.2f}, Precision: {precision:.2f}, Recall: {recall:.2f}, F1: {f1:.2f}, AUC: {auc:.2f}")
+        
+        # Save models
+        self.save_model()
+            
+        return {
+            'cibil_model': {
+                'rmse': cibil_rmse,
+                'feature_importance': dict(zip(cibil_features.columns, self.cibil_model.feature_importances_))
+            },
+            'default_model': {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'auc': auc,
+                'feature_importance': dict(zip(default_features.columns, self.default_model.feature_importances_))
+            }
+        }
+    
+    def save_model(self):
+        """Save models to disk"""
+        # Save CIBIL prediction model and scaler
+        joblib.dump(self.cibil_model, os.path.join(self.model_dir, 'cibil_model.pkl'))
+        joblib.dump(self.cibil_scaler, os.path.join(self.model_dir, 'scaler.pkl'))
+        
+        # Save default prediction model and scaler
+        joblib.dump(self.default_model, os.path.join(self.model_dir, 'default_model.pkl'))
+        joblib.dump(self.default_scaler, os.path.join(self.model_dir, 'default_scaler.pkl'))
+        
+        print("Models saved successfully")
+    
+    def load_model(self):
+        """Load models from disk"""
+        # Load CIBIL prediction model and scaler
+        self.cibil_model = joblib.load(os.path.join(self.model_dir, 'cibil_model.pkl'))
+        self.cibil_scaler = joblib.load(os.path.join(self.model_dir, 'scaler.pkl'))
+        
+        # Load default prediction model and scaler
+        self.default_model = joblib.load(os.path.join(self.model_dir, 'default_model.pkl'))
+        self.default_scaler = joblib.load(os.path.join(self.model_dir, 'default_scaler.pkl'))
+        
+        print("Models loaded successfully")
+    
+    def predict_cibil_impact(self, features):
+        """Predict CIBIL score impact based on features"""
+        # Scale features
+        features_scaled = self.cibil_scaler.transform([features])
+            
+            # Make prediction
+        impact = self.cibil_model.predict(features_scaled)[0]
+        
+        return impact
+    
+    def predict_default_probability(self, features):
+        """Predict default probability based on features"""
+        # Scale features
+        features_scaled = self.default_scaler.transform([features])
+        
+        # Make prediction
+        default_prob = self.default_model.predict_proba(features_scaled)[0][1]
+        
+        return default_prob
+    
+    def create_training_data(self, output_file='cibil_data.csv', num_samples=300):
+        """Create synthetic training data for model development"""
+        np.random.seed(42)
+        
+        # Generate random data
+        data = {
+            'Name': [f'Person_{i}' for i in range(num_samples)],
+            'PAN': [f'PAN{i:05d}' for i in range(num_samples)],
+            'CIBIL': np.random.randint(300, 900, num_samples),
+            'DOB': [f'{np.random.randint(1, 29):02d}-{np.random.randint(1, 13):02d}-{np.random.randint(1960, 2000)}' for _ in range(num_samples)],
+            'Loan_Type': np.random.choice(['Personal Loan', 'Home Loan', 'Car Loan', 'Education Loan'], num_samples),
+            'Sanctioned_Amount': np.random.randint(100000, 5000000, num_samples),
+            'Current_Amount': np.random.randint(50000, 5000000, num_samples),
+            'Credit_Card': np.random.choice(['YES', 'NO'], num_samples),
+            'Late_Payment': np.random.choice(['YES', 'NO'], num_samples, p=[0.3, 0.7]),
+            'Loan_Tenure': np.random.randint(1, 30, num_samples),
+            'Interest_Rate': np.random.uniform(7.0, 18.0, num_samples),
+            'Monthly_Income': np.random.randint(20000, 200000, num_samples),
+            'Monthly_EMI': np.random.randint(1000, 50000, num_samples),
+            'Previous_Loans': np.random.randint(0, 6, num_samples),
+            'Defaults': np.random.randint(0, 3, num_samples),
+            'Credit_Cards_Count': np.random.randint(0, 6, num_samples),
+            'Credit_Utilization': np.random.randint(0, 100, num_samples),
+            'Loan_Repayment_History': np.random.choice(['Good', 'Average', 'Poor'], num_samples, p=[0.6, 0.3, 0.1]),
+            'Other_Debts': np.random.choice(['YES', 'NO'], num_samples),
+            'Employment_Type': np.random.choice(['Salaried', 'Self-Employed', 'Freelancer'], num_samples),
+            'Existing_EMIs': np.random.randint(0, 4, num_samples),
+            'Savings_Balance': np.random.randint(10000, 500000, num_samples),
+            'Total_Annual_Income': []
+        }
+        
+        # Calculate annual income from monthly
+        for income in data['Monthly_Income']:
+            annual = income * 12
+            # Add some variation
+            data['Total_Annual_Income'].append(annual + np.random.randint(-50000, 50000))
+        
+        # Calculate debt-to-income ratio
+        data['Debt_to_Income_Ratio'] = []
+        for emi, income in zip(data['Monthly_EMI'], data['Monthly_Income']):
+            if income > 0:
+                dti = emi / income
+                # Cap at a reasonable value
+                dti = min(dti, 0.8)
+            else:
+                dti = 0
+            data['Debt_to_Income_Ratio'].append(round(dti, 3))
+        
+        # Create DataFrame and save to CSV
+        df = pd.DataFrame(data)
+        df.to_csv(output_file, index=False)
+        
+        print(f"Created training data with {num_samples} samples and saved to {output_file}")
+        
+        return df
 
 def main():
     try:
